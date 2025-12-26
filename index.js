@@ -460,7 +460,7 @@ async function handleMediaCatalog(catalogType) {
 // Manifest de l'addon
 const manifest = {
     id: 'community.torbox.status',
-    version: '2.0.1',
+    version: '2.0.2',
     name: 'Torbox Status',
     description: 'Stats Torbox + Films & Séries récents avec vrais posters',
     logo: 'https://torbox.app/favicon.ico',
@@ -725,7 +725,7 @@ async function generateStreamsForTorrent(torrent) {
                     const quality = extractQuality(file.name);
 
                     streams.push({
-                        name: `⚡ Torbox`,
+                        name: `⚡ TORBOX CLOUD`,
                         title: `${quality ? quality + ' • ' : ''}${file.name}`,
                         url: streamUrl
                     });
@@ -743,7 +743,7 @@ async function generateStreamsForTorrent(torrent) {
             const quality = extractQuality(torrent.name);
 
             streams.push({
-                name: `⚡ Torbox`,
+                name: `⚡ TORBOX CLOUD`,
                 title: `${quality ? quality + ' • ' : ''}${torrent.name}`,
                 url: streamUrl
             });
