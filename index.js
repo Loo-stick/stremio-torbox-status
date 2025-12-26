@@ -143,6 +143,21 @@ function generatePoster(emoji, value, bgColor = '1a1a2e') {
 }
 
 /**
+ * Convertit l'ID du plan Torbox en nom lisible
+ * @param {number|string} planId
+ * @returns {string}
+ */
+function getPlanName(planId) {
+    const plans = {
+        0: 'Free',
+        1: 'Essential',
+        2: 'Standard',
+        3: 'Pro'
+    };
+    return plans[planId] || `Plan ${planId}`;
+}
+
+/**
  * Extrait les infos de qualité depuis un nom de release
  * @param {string} name
  * @returns {string}
@@ -242,7 +257,7 @@ async function handleHistoryCatalog() {
 // Manifest de l'addon
 const manifest = {
     id: 'community.torbox.status',
-    version: '1.1.0',
+    version: '1.1.1',
     name: 'Torbox Status',
     description: 'Stats Torbox + Derniers visionnages',
     logo: 'https://torbox.app/favicon.ico',
@@ -291,7 +306,7 @@ builder.defineCatalogHandler(async ({ type, id }) => {
         // Debug: affiche les données brutes
         console.log('[TorboxStatus] ═══════════════════════════════════════');
         console.log('[TorboxStatus] Utilisateur:', user.email);
-        console.log('[TorboxStatus] Plan:', user.plan);
+        console.log('[TorboxStatus] Plan:', getPlanName(user.plan));
         console.log('[TorboxStatus] Premium expires:', user.premium_expires_at, '→', formatDate(user.premium_expires_at));
         console.log('[TorboxStatus] Jours restants:', daysRemaining(user.premium_expires_at));
         console.log('[TorboxStatus] Cloud:', formatBytes(user.total_bytes_downloaded || 0));
@@ -310,9 +325,9 @@ builder.defineCatalogHandler(async ({ type, id }) => {
         metas.push({
             id: 'tbstatus:plan',
             type: 'other',
-            name: `${user.plan || 'Free'} - ${daysText}`,
+            name: `${getPlanName(user.plan)} - ${daysText}`,
             poster: generatePoster('📅', daysDisplay, '16213e'),
-            description: `Plan: ${user.plan || 'Free'}\nStatut: ${planStatus}\nExpire le: ${formatDate(user.premium_expires_at)}`,
+            description: `Plan: ${getPlanName(user.plan)}\nStatut: ${planStatus}\nExpire le: ${formatDate(user.premium_expires_at)}`,
             releaseInfo: planStatus
         });
 
@@ -412,8 +427,8 @@ builder.defineMetaHandler(async ({ type, id }) => {
         switch (statType) {
             case 'plan':
                 const days = daysRemaining(user.premium_expires_at);
-                meta.name = `${user.plan} - ${days} jours restants`;
-                meta.description = `Plan: ${user.plan}\nExpire le: ${formatDate(user.premium_expires_at)}\n\nJours restants: ${days}`;
+                meta.name = `${getPlanName(user.plan)} - ${days} jours restants`;
+                meta.description = `Plan: ${getPlanName(user.plan)}\nExpire le: ${formatDate(user.premium_expires_at)}\n\nJours restants: ${days}`;
                 meta.poster = generatePoster('📅', `${days}j`, '16213e');
                 break;
             case 'cloud':
