@@ -295,7 +295,7 @@ async function handleHistoryCatalog() {
 // Manifest de l'addon
 const manifest = {
     id: 'community.torbox.status',
-    version: '1.2.0',
+    version: '1.2.1',
     name: 'Torbox Status',
     description: 'Stats Torbox + Derniers visionnages',
     logo: 'https://torbox.app/favicon.ico',
@@ -443,14 +443,56 @@ builder.defineCatalogHandler(async ({ type, id }) => {
 });
 
 /**
- * Handler meta - Détails d'une stat
+ * Handler meta - Détails d'une stat ou d'un torrent
  */
 builder.defineMetaHandler(async ({ type, id }) => {
-    if (type !== 'other' || !id.startsWith('tbstatus:')) {
+    if (type !== 'other') {
         return { meta: null };
     }
 
-    // On retourne les mêmes infos que le catalogue
+    // Meta pour les entrées historique
+    if (id.startsWith('tbhistory:')) {
+        const torrentId = id.replace('tbhistory:', '');
+        console.log(`[TorboxMeta] Demande meta pour torrent ${torrentId}`);
+
+        try {
+            let torrent = torrentsCache.get(torrentId);
+            if (!torrent) {
+                console.log('[TorboxMeta] Torrent pas en cache, rechargement...');
+                await getTorboxTorrents();
+                torrent = torrentsCache.get(torrentId);
+            }
+
+            if (!torrent) {
+                console.log('[TorboxMeta] Torrent introuvable');
+                return { meta: null };
+            }
+
+            const quality = extractQuality(torrent.name);
+            const size = formatBytes(torrent.size || 0);
+            const date = formatRelativeDate(torrent.updated_at || torrent.created_at);
+
+            return {
+                meta: {
+                    id,
+                    type: 'other',
+                    name: torrent.name,
+                    poster: generatePoster('🎬', quality || size, '2d4a3e'),
+                    background: generatePoster('🎬', quality || '', '1a1a2e'),
+                    description: `Taille: ${size}\nAjouté: ${date}\n\nRelease complète:\n${torrent.name}`
+                }
+            };
+        } catch (error) {
+            console.error('[TorboxMeta] Erreur:', error.message);
+            return { meta: null };
+        }
+    }
+
+    // Meta pour les stats (tbstatus:)
+    if (!id.startsWith('tbstatus:')) {
+        return { meta: null };
+    }
+
     try {
         const user = await getTorboxUserInfo();
         const statType = id.replace('tbstatus:', '');
