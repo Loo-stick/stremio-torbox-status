@@ -460,7 +460,7 @@ async function handleMediaCatalog(catalogType) {
 // Manifest de l'addon
 const manifest = {
     id: 'community.torbox.status',
-    version: '2.0.2',
+    version: '2.0.3',
     name: 'Torbox Status',
     description: 'Stats Torbox + Films & Séries récents avec vrais posters',
     logo: 'https://torbox.app/favicon.ico',
@@ -781,22 +781,52 @@ builder.defineStreamHandler(async ({ type, id }) => {
                 torrent = torrentsCache.get(torrentId);
             }
         }
-        // Cas 2: IMDB ID tt...
+        // Cas 2: IMDB ID tt... (film ou épisode)
         else if (id.startsWith('tt')) {
-            // Cherche dans le cache un torrent avec cet IMDB ID
             await getTorboxTorrents(); // Recharge pour être sûr
 
-            for (const [, t] of torrentsCache) {
-                if (t._imdbId === id) {
-                    torrent = t;
-                    break;
-                }
+            // Parse l'ID pour détecter si c'est un épisode (tt1234567:1:3)
+            const idParts = id.split(':');
+            const imdbId = idParts[0];
+            const season = idParts[1] ? parseInt(idParts[1]) : null;
+            const episode = idParts[2] ? parseInt(idParts[2]) : null;
+
+            const isEpisode = season !== null && episode !== null;
+
+            if (isEpisode) {
+                console.log(`[TorboxStream] Recherche épisode: ${imdbId} S${season}E${episode}`);
             }
 
-            // Si pas trouvé dans le cache avec _imdbId, cherche par parsing
-            if (!torrent) {
-                for (const [, t] of torrentsCache) {
-                    const parsed = parseTorrentName(t.name);
+            // Cherche dans le cache un torrent correspondant
+            for (const [, t] of torrentsCache) {
+                const parsed = parseTorrentName(t.name);
+
+                // Pour les épisodes, vérifie que c'est la bonne série ET le bon épisode
+                if (isEpisode) {
+                    // Vérifie si c'est la bonne série (par IMDB ou par titre)
+                    let isRightSeries = t._imdbId === imdbId;
+
+                    if (!isRightSeries) {
+                        const cinemetaResult = await searchCinemeta(parsed.title, 'series', parsed.year);
+                        if (cinemetaResult && cinemetaResult.id === imdbId) {
+                            t._imdbId = imdbId;
+                            isRightSeries = true;
+                        }
+                    }
+
+                    // Vérifie le numéro de saison/épisode
+                    if (isRightSeries && parsed.season === season && parsed.episode === episode) {
+                        torrent = t;
+                        console.log(`[TorboxStream] Épisode trouvé: ${t.name}`);
+                        break;
+                    }
+                } else {
+                    // Pour les films, logique existante
+                    if (t._imdbId === id) {
+                        torrent = t;
+                        break;
+                    }
+
                     const cinemetaResult = await searchCinemeta(parsed.title, parsed.type, parsed.year);
                     if (cinemetaResult && cinemetaResult.id === id) {
                         t._imdbId = id;
