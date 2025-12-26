@@ -11,13 +11,21 @@ require('dotenv').config();
 const { addonBuilder, getRouter } = require('stremio-addon-sdk');
 const express = require('express');
 const fetch = require('node-fetch');
+const ptt = require('parse-torrent-title');
 
 const PORT = parseInt(process.env.PORT, 10) || 7003;
 const TORBOX_API_KEY = process.env.TORBOX_API_KEY;
 const TORBOX_API_URL = 'https://api.torbox.app/v1/api';
+const CINEMETA_URL = 'https://v3-cinemeta.strem.io';
 
 /** Cache des torrents pour le stream handler */
 const torrentsCache = new Map();
+
+/** Cache des métadonnées Cinemeta (IMDB ID → meta) */
+const cinemetaCache = new Map();
+
+/** Cache de recherche (titre → IMDB ID) */
+const searchCache = new Map();
 
 /**
  * Récupère les infos du compte Torbox
@@ -68,6 +76,121 @@ async function getTorboxTorrents() {
     torrents.forEach(t => torrentsCache.set(String(t.id), t));
 
     return torrents;
+}
+
+/**
+ * Parse le nom d'un torrent pour extraire les infos
+ * @param {string} name - Nom du torrent
+ * @returns {Object} { title, year, season, episode, type }
+ */
+function parseTorrentName(name) {
+    const parsed = ptt.parse(name);
+
+    // Détermine le type
+    const type = (parsed.season || parsed.episode) ? 'series' : 'movie';
+
+    return {
+        title: parsed.title || name,
+        year: parsed.year || null,
+        season: parsed.season || null,
+        episode: parsed.episode || null,
+        quality: parsed.resolution || parsed.quality || null,
+        type
+    };
+}
+
+/**
+ * Recherche un contenu sur Cinemeta par titre
+ * @param {string} title - Titre à rechercher
+ * @param {string} type - Type (movie ou series)
+ * @param {number} [year] - Année (optionnel)
+ * @returns {Promise<Object|null>} Métadonnées ou null
+ */
+async function searchCinemeta(title, type, year = null) {
+    const cacheKey = `${type}:${title}:${year || ''}`;
+
+    if (searchCache.has(cacheKey)) {
+        return searchCache.get(cacheKey);
+    }
+
+    try {
+        // Nettoie le titre pour la recherche
+        const cleanTitle = title
+            .replace(/[^\w\s]/g, ' ')
+            .replace(/\s+/g, ' ')
+            .trim();
+
+        const searchUrl = `${CINEMETA_URL}/catalog/${type}/top/search=${encodeURIComponent(cleanTitle)}.json`;
+        console.log(`[Cinemeta] Recherche: ${cleanTitle} (${type})`);
+
+        const response = await fetch(searchUrl, { timeout: 5000 });
+
+        if (!response.ok) {
+            console.log(`[Cinemeta] Erreur HTTP: ${response.status}`);
+            return null;
+        }
+
+        const data = await response.json();
+
+        if (!data.metas || data.metas.length === 0) {
+            console.log(`[Cinemeta] Aucun résultat pour "${cleanTitle}"`);
+            searchCache.set(cacheKey, null);
+            return null;
+        }
+
+        // Trouve le meilleur match (par année si disponible)
+        let bestMatch = data.metas[0];
+
+        if (year) {
+            const yearMatch = data.metas.find(m => {
+                const metaYear = m.year || (m.releaseInfo && parseInt(m.releaseInfo));
+                return metaYear === year;
+            });
+            if (yearMatch) bestMatch = yearMatch;
+        }
+
+        console.log(`[Cinemeta] Trouvé: ${bestMatch.name} (${bestMatch.id})`);
+
+        // Met en cache
+        searchCache.set(cacheKey, bestMatch);
+        cinemetaCache.set(bestMatch.id, bestMatch);
+
+        return bestMatch;
+
+    } catch (error) {
+        console.error(`[Cinemeta] Erreur recherche:`, error.message);
+        return null;
+    }
+}
+
+/**
+ * Récupère les métadonnées complètes depuis Cinemeta
+ * @param {string} type - Type (movie ou series)
+ * @param {string} imdbId - IMDB ID
+ * @returns {Promise<Object|null>}
+ */
+async function getCinemetaMeta(type, imdbId) {
+    if (cinemetaCache.has(imdbId)) {
+        return cinemetaCache.get(imdbId);
+    }
+
+    try {
+        const url = `${CINEMETA_URL}/meta/${type}/${imdbId}.json`;
+        const response = await fetch(url, { timeout: 5000 });
+
+        if (!response.ok) return null;
+
+        const data = await response.json();
+        if (data.meta) {
+            cinemetaCache.set(imdbId, data.meta);
+            return data.meta;
+        }
+
+        return null;
+    } catch (error) {
+        console.error(`[Cinemeta] Erreur meta:`, error.message);
+        return null;
+    }
 }
 
 /**
@@ -233,11 +356,12 @@ function formatRelativeDate(dateValue) {
 }
 
 /**
- * Handler pour le catalogue Historique
+ * Handler pour le catalogue Films ou Séries
+ * @param {string} catalogType - 'movie' ou 'series'
  * @returns {Promise<Object>}
  */
-async function handleHistoryCatalog() {
-    console.log('[TorboxHistory] Récupération des torrents...');
+async function handleMediaCatalog(catalogType) {
+    console.log(`[TorboxMedia] Récupération des ${catalogType === 'movie' ? 'films' : 'séries'}...`);
 
     try {
         const torrents = await getTorboxTorrents();
@@ -249,55 +373,96 @@ async function handleHistoryCatalog() {
             return dateB.getTime() - dateA.getTime();
         });
 
-        // Limite à 20 entrées
-        const recent = sorted.slice(0, 20);
+        console.log(`[TorboxMedia] ═══════════════════════════════════════`);
+        console.log(`[TorboxMedia] ${torrents.length} torrents trouvés`);
 
-        console.log('[TorboxHistory] ═══════════════════════════════════════');
-        console.log(`[TorboxHistory] ${torrents.length} torrents trouvés, affichage des ${recent.length} plus récents`);
+        const metas = [];
+        const seenImdb = new Set(); // Évite les doublons
 
-        const metas = recent.map((torrent, index) => {
+        for (const torrent of sorted) {
+            if (metas.length >= 20) break; // Limite à 20
+
             const name = torrent.name || 'Sans nom';
-            const quality = extractQuality(name);
-            const size = formatBytes(torrent.size || 0);
-            const date = formatRelativeDate(torrent.updated_at || torrent.created_at);
+            const parsed = parseTorrentName(name);
 
-            console.log(`[TorboxHistory] ${index + 1}. ${name.substring(0, 50)}...`);
+            // Filtre par type
+            if (parsed.type !== catalogType) continue;
 
-            return {
-                id: `tbhistory:${torrent.id}`,
-                type: 'other',
-                name: name,
-                poster: generatePoster('🎬', quality || size, '2d4a3e'),
-                description: `Taille: ${size}\nAjouté: ${date}\n\nRelease: ${name}`,
-                releaseInfo: quality || size
-            };
-        });
+            console.log(`[TorboxMedia] Parsing: ${parsed.title} (${parsed.year || '?'}) - ${parsed.type}`);
 
-        console.log('[TorboxHistory] ═══════════════════════════════════════');
-        console.log(`[TorboxHistory] ${metas.length} entrées générées`);
+            // Recherche sur Cinemeta
+            const cinemetaResult = await searchCinemeta(parsed.title, parsed.type, parsed.year);
+
+            if (cinemetaResult && !seenImdb.has(cinemetaResult.id)) {
+                seenImdb.add(cinemetaResult.id);
+
+                // Stocke le mapping torrent → IMDB pour le stream handler
+                if (!torrent._imdbId) {
+                    torrent._imdbId = cinemetaResult.id;
+                    torrent._parsed = parsed;
+                    torrentsCache.set(String(torrent.id), torrent);
+                }
+
+                const quality = parsed.quality || extractQuality(name);
+
+                metas.push({
+                    id: cinemetaResult.id, // IMDB ID pour que Stremio le reconnaisse
+                    type: catalogType,
+                    name: cinemetaResult.name,
+                    poster: cinemetaResult.poster,
+                    background: cinemetaResult.background,
+                    description: cinemetaResult.description,
+                    releaseInfo: cinemetaResult.releaseInfo || (parsed.year ? String(parsed.year) : ''),
+                    imdbRating: cinemetaResult.imdbRating,
+                    // Métadonnées custom pour notre addon
+                    _torboxId: torrent.id,
+                    _quality: quality,
+                    _torrentName: name
+                });
+
+                console.log(`[TorboxMedia] ✓ ${cinemetaResult.name} (${cinemetaResult.id})`);
+            } else if (!cinemetaResult) {
+                // Pas trouvé sur Cinemeta, affiche quand même avec un poster générique
+                const quality = parsed.quality || extractQuality(name);
+                const fallbackId = `tb:${torrent.id}`;
+
+                if (!seenImdb.has(fallbackId)) {
+                    seenImdb.add(fallbackId);
+
+                    metas.push({
+                        id: fallbackId,
+                        type: catalogType,
+                        name: parsed.title,
+                        poster: generatePoster('🎬', quality || '?', '2d4a3e'),
+                        description: `Release: ${name}`,
+                        releaseInfo: parsed.year ? String(parsed.year) : quality,
+                        _torboxId: torrent.id,
+                        _quality: quality,
+                        _torrentName: name
+                    });
+
+                    console.log(`[TorboxMedia] ○ ${parsed.title} (fallback)`);
+                }
+            }
+        }
+
+        console.log(`[TorboxMedia] ═══════════════════════════════════════`);
+        console.log(`[TorboxMedia] ${metas.length} ${catalogType === 'movie' ? 'films' : 'séries'} trouvé(e)s`);
 
         return { metas };
 
     } catch (error) {
-        console.error('[TorboxHistory] Erreur:', error.message);
-        return {
-            metas: [{
-                id: 'tbhistory:error',
-                type: 'other',
-                name: 'Erreur de connexion',
-                poster: generatePoster('❌', 'Erreur', 'ff0000'),
-                description: `Impossible de récupérer l'historique.\n\nErreur: ${error.message}`
-            }]
-        };
+        console.error('[TorboxMedia] Erreur:', error.message);
+        return { metas: [] };
     }
 }
 
 // Manifest de l'addon
 const manifest = {
     id: 'community.torbox.status',
-    version: '1.2.1',
+    version: '2.0.0',
     name: 'Torbox Status',
-    description: 'Stats Torbox + Derniers visionnages',
+    description: 'Stats Torbox + Films & Séries récents avec vrais posters',
     logo: 'https://torbox.app/favicon.ico',
     catalogs: [
         {
@@ -306,33 +471,39 @@ const manifest = {
             name: 'Torbox Status'
         },
         {
-            type: 'other',
-            id: 'torbox-history',
-            name: 'Derniers Visionnages'
+            type: 'movie',
+            id: 'torbox-movies',
+            name: 'Torbox Films'
+        },
+        {
+            type: 'series',
+            id: 'torbox-series',
+            name: 'Torbox Séries'
         }
     ],
     resources: ['catalog', 'meta', 'stream'],
-    types: ['other'],
-    idPrefixes: ['tbstatus:', 'tbhistory:']
+    types: ['other', 'movie', 'series'],
+    idPrefixes: ['tbstatus:', 'tb:']
 };
 
 const builder = new addonBuilder(manifest);
 
 /**
- * Handler du catalogue - Affiche les stats ou l'historique
+ * Handler du catalogue - Stats, Films ou Séries
  */
 builder.defineCatalogHandler(async ({ type, id }) => {
-    if (type !== 'other') {
-        return { metas: [] };
+    // Catalogue Films
+    if (type === 'movie' && id === 'torbox-movies') {
+        return handleMediaCatalog('movie');
     }
 
-    // Catalogue Historique
-    if (id === 'torbox-history') {
-        return handleHistoryCatalog();
+    // Catalogue Séries
+    if (type === 'series' && id === 'torbox-series') {
+        return handleMediaCatalog('series');
     }
 
-    // Catalogue Status
-    if (id !== 'torbox-status') {
+    // Catalogue Status (type other)
+    if (type !== 'other' || id !== 'torbox-status') {
         return { metas: [] };
     }
 
@@ -443,17 +614,13 @@ builder.defineCatalogHandler(async ({ type, id }) => {
 });
 
 /**
- * Handler meta - Détails d'une stat ou d'un torrent
+ * Handler meta - Détails d'une stat ou d'un torrent fallback
  */
 builder.defineMetaHandler(async ({ type, id }) => {
-    if (type !== 'other') {
-        return { meta: null };
-    }
-
-    // Meta pour les entrées historique
-    if (id.startsWith('tbhistory:')) {
-        const torrentId = id.replace('tbhistory:', '');
-        console.log(`[TorboxMeta] Demande meta pour torrent ${torrentId}`);
+    // Meta pour les fallback tb: (films/séries non trouvés sur Cinemeta)
+    if (id.startsWith('tb:')) {
+        const torrentId = id.replace('tb:', '');
+        console.log(`[TorboxMeta] Demande meta fallback pour torrent ${torrentId}`);
 
         try {
             let torrent = torrentsCache.get(torrentId);
@@ -468,18 +635,19 @@ builder.defineMetaHandler(async ({ type, id }) => {
                 return { meta: null };
             }
 
-            const quality = extractQuality(torrent.name);
+            const parsed = parseTorrentName(torrent.name);
+            const quality = parsed.quality || extractQuality(torrent.name);
             const size = formatBytes(torrent.size || 0);
-            const date = formatRelativeDate(torrent.updated_at || torrent.created_at);
 
             return {
                 meta: {
                     id,
-                    type: 'other',
-                    name: torrent.name,
+                    type: type,
+                    name: parsed.title,
                     poster: generatePoster('🎬', quality || size, '2d4a3e'),
                     background: generatePoster('🎬', quality || '', '1a1a2e'),
-                    description: `Taille: ${size}\nAjouté: ${date}\n\nRelease complète:\n${torrent.name}`
+                    description: `Release: ${torrent.name}\n\nTaille: ${size}`,
+                    releaseInfo: parsed.year ? String(parsed.year) : quality
                 }
             };
         } catch (error) {
@@ -488,8 +656,11 @@ builder.defineMetaHandler(async ({ type, id }) => {
         }
     }
 
-    // Meta pour les stats (tbstatus:)
-    if (!id.startsWith('tbstatus:')) {
+    // Les IDs IMDB (tt...) sont gérés automatiquement par Stremio via Cinemeta
+    // On ne fait rien ici
+
+    // Meta pour les stats (tbstatus:) - type other uniquement
+    if (type !== 'other' || !id.startsWith('tbstatus:')) {
         return { meta: null };
     }
 
@@ -532,75 +703,118 @@ builder.defineMetaHandler(async ({ type, id }) => {
 });
 
 /**
- * Handler de stream - Lance un torrent depuis l'historique
+ * Génère les streams pour un torrent donné
+ * @param {Object} torrent - Objet torrent
+ * @returns {Promise<Array>}
+ */
+async function generateStreamsForTorrent(torrent) {
+    const streams = [];
+
+    // Si le torrent a des fichiers listés, on crée un stream par fichier vidéo
+    if (torrent.files && torrent.files.length > 0) {
+        const videoExtensions = ['.mkv', '.mp4', '.avi', '.mov', '.wmv', '.webm'];
+
+        for (const file of torrent.files) {
+            const isVideo = videoExtensions.some(ext =>
+                file.name.toLowerCase().endsWith(ext)
+            );
+
+            if (isVideo) {
+                try {
+                    const streamUrl = await getTorboxStreamLink(torrent.id, file.id);
+                    const quality = extractQuality(file.name);
+
+                    streams.push({
+                        name: `⚡ Torbox`,
+                        title: `${quality ? quality + ' • ' : ''}${file.name}`,
+                        url: streamUrl
+                    });
+
+                    console.log(`[TorboxStream] Stream ajouté: ${file.name}`);
+                } catch (err) {
+                    console.error(`[TorboxStream] Erreur fichier ${file.id}:`, err.message);
+                }
+            }
+        }
+    } else {
+        // Pas de fichiers listés, on essaie avec le torrent entier
+        try {
+            const streamUrl = await getTorboxStreamLink(torrent.id);
+            const quality = extractQuality(torrent.name);
+
+            streams.push({
+                name: `⚡ Torbox`,
+                title: `${quality ? quality + ' • ' : ''}${torrent.name}`,
+                url: streamUrl
+            });
+
+            console.log(`[TorboxStream] Stream ajouté: ${torrent.name}`);
+        } catch (err) {
+            console.error(`[TorboxStream] Erreur torrent:`, err.message);
+        }
+    }
+
+    return streams;
+}
+
+/**
+ * Handler de stream - Lance un film/série depuis Torbox
  */
 builder.defineStreamHandler(async ({ type, id }) => {
-    if (type !== 'other' || !id.startsWith('tbhistory:')) {
+    console.log(`[TorboxStream] Demande de stream: type=${type}, id=${id}`);
+
+    // Ignore les types non supportés
+    if (!['movie', 'series', 'other'].includes(type)) {
         return { streams: [] };
     }
 
-    const torrentId = id.replace('tbhistory:', '');
-    console.log(`[TorboxStream] Demande de stream pour torrent ${torrentId}`);
-
     try {
-        // Vérifie le cache, sinon recharge les torrents
-        let torrent = torrentsCache.get(torrentId);
-        if (!torrent) {
-            console.log('[TorboxStream] Torrent pas en cache, rechargement...');
-            await getTorboxTorrents();
+        let torrent = null;
+
+        // Cas 1: ID fallback tb:xxx
+        if (id.startsWith('tb:')) {
+            const torrentId = id.replace('tb:', '');
             torrent = torrentsCache.get(torrentId);
+
+            if (!torrent) {
+                await getTorboxTorrents();
+                torrent = torrentsCache.get(torrentId);
+            }
         }
+        // Cas 2: IMDB ID tt...
+        else if (id.startsWith('tt')) {
+            // Cherche dans le cache un torrent avec cet IMDB ID
+            await getTorboxTorrents(); // Recharge pour être sûr
 
-        if (!torrent) {
-            console.log('[TorboxStream] Torrent introuvable');
-            return { streams: [] };
-        }
+            for (const [, t] of torrentsCache) {
+                if (t._imdbId === id) {
+                    torrent = t;
+                    break;
+                }
+            }
 
-        const streams = [];
-
-        // Si le torrent a des fichiers listés, on crée un stream par fichier vidéo
-        if (torrent.files && torrent.files.length > 0) {
-            const videoExtensions = ['.mkv', '.mp4', '.avi', '.mov', '.wmv', '.webm'];
-
-            for (const file of torrent.files) {
-                const isVideo = videoExtensions.some(ext =>
-                    file.name.toLowerCase().endsWith(ext)
-                );
-
-                if (isVideo) {
-                    try {
-                        const streamUrl = await getTorboxStreamLink(torrent.id, file.id);
-                        const quality = extractQuality(file.name);
-
-                        streams.push({
-                            name: `Torbox`,
-                            title: `${quality ? quality + ' • ' : ''}${file.name}`,
-                            url: streamUrl
-                        });
-
-                        console.log(`[TorboxStream] Stream ajouté: ${file.name}`);
-                    } catch (err) {
-                        console.error(`[TorboxStream] Erreur fichier ${file.id}:`, err.message);
+            // Si pas trouvé dans le cache avec _imdbId, cherche par parsing
+            if (!torrent) {
+                for (const [, t] of torrentsCache) {
+                    const parsed = parseTorrentName(t.name);
+                    const cinemetaResult = await searchCinemeta(parsed.title, parsed.type, parsed.year);
+                    if (cinemetaResult && cinemetaResult.id === id) {
+                        t._imdbId = id;
+                        torrent = t;
+                        break;
                     }
                 }
             }
-        } else {
-            // Pas de fichiers listés, on essaie avec le torrent entier
-            try {
-                const streamUrl = await getTorboxStreamLink(torrent.id);
-                const quality = extractQuality(torrent.name);
-
-                streams.push({
-                    name: `Torbox`,
-                    title: `${quality ? quality + ' • ' : ''}${torrent.name}`,
-                    url: streamUrl
-                });
-
-                console.log(`[TorboxStream] Stream ajouté: ${torrent.name}`);
-            } catch (err) {
-                console.error(`[TorboxStream] Erreur torrent:`, err.message);
-            }
         }
+
+        if (!torrent) {
+            console.log('[TorboxStream] Aucun torrent trouvé pour cet ID');
+            return { streams: [] };
+        }
+
+        console.log(`[TorboxStream] Torrent trouvé: ${torrent.name}`);
+
+        const streams = await generateStreamsForTorrent(torrent);
 
         console.log(`[TorboxStream] ${streams.length} stream(s) disponible(s)`);
         return { streams };
