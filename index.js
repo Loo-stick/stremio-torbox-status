@@ -40,6 +40,29 @@ async function getTorboxUserInfo() {
 }
 
 /**
+ * Récupère la liste des torrents Torbox
+ * @returns {Promise<Array>}
+ */
+async function getTorboxTorrents() {
+    if (!TORBOX_API_KEY) {
+        throw new Error('TORBOX_API_KEY non configurée');
+    }
+
+    const response = await fetch(`${TORBOX_API_URL}/torrents/mylist?bypass_cache=true`, {
+        headers: {
+            'Authorization': `Bearer ${TORBOX_API_KEY}`
+        }
+    });
+
+    if (!response.ok) {
+        throw new Error(`Erreur API Torbox: ${response.status}`);
+    }
+
+    const data = await response.json();
+    return data.data || [];
+}
+
+/**
  * Formate les bytes en taille lisible
  * @param {number} bytes
  * @returns {string}
@@ -119,32 +142,144 @@ function generatePoster(emoji, value, bgColor = '1a1a2e') {
     return `https://placehold.co/300x450/${bgColor}/ffffff?text=${text}&font=roboto`;
 }
 
+/**
+ * Extrait les infos de qualité depuis un nom de release
+ * @param {string} name
+ * @returns {string}
+ */
+function extractQuality(name) {
+    const qualities = ['2160p', '4K', 'UHD', '1080p', '720p', '480p', 'HDR', 'DV', 'REMUX'];
+    for (const q of qualities) {
+        if (name.toUpperCase().includes(q.toUpperCase())) {
+            return q;
+        }
+    }
+    return '';
+}
+
+/**
+ * Formate la date relative (il y a X jours)
+ * @param {string|number} dateValue
+ * @returns {string}
+ */
+function formatRelativeDate(dateValue) {
+    const date = parseDate(dateValue);
+    if (!date || isNaN(date.getTime())) return '';
+
+    const now = Date.now();
+    const diff = now - date.getTime();
+    const days = Math.floor(diff / (1000 * 60 * 60 * 24));
+    const hours = Math.floor(diff / (1000 * 60 * 60));
+
+    if (hours < 1) return 'À l\'instant';
+    if (hours < 24) return `Il y a ${hours}h`;
+    if (days === 1) return 'Hier';
+    if (days < 7) return `Il y a ${days} jours`;
+    if (days < 30) return `Il y a ${Math.floor(days / 7)} sem.`;
+    return formatDate(dateValue);
+}
+
+/**
+ * Handler pour le catalogue Historique
+ * @returns {Promise<Object>}
+ */
+async function handleHistoryCatalog() {
+    console.log('[TorboxHistory] Récupération des torrents...');
+
+    try {
+        const torrents = await getTorboxTorrents();
+
+        // Trie par date de mise à jour (plus récent en premier)
+        const sorted = torrents.sort((a, b) => {
+            const dateA = parseDate(a.updated_at) || parseDate(a.created_at) || new Date(0);
+            const dateB = parseDate(b.updated_at) || parseDate(b.created_at) || new Date(0);
+            return dateB.getTime() - dateA.getTime();
+        });
+
+        // Limite à 20 entrées
+        const recent = sorted.slice(0, 20);
+
+        console.log('[TorboxHistory] ═══════════════════════════════════════');
+        console.log(`[TorboxHistory] ${torrents.length} torrents trouvés, affichage des ${recent.length} plus récents`);
+
+        const metas = recent.map((torrent, index) => {
+            const name = torrent.name || 'Sans nom';
+            const quality = extractQuality(name);
+            const size = formatBytes(torrent.size || 0);
+            const date = formatRelativeDate(torrent.updated_at || torrent.created_at);
+
+            console.log(`[TorboxHistory] ${index + 1}. ${name.substring(0, 50)}...`);
+
+            return {
+                id: `tbhistory:${torrent.id}`,
+                type: 'other',
+                name: name,
+                poster: generatePoster('🎬', quality || size, '2d4a3e'),
+                description: `Taille: ${size}\nAjouté: ${date}\n\nRelease: ${name}`,
+                releaseInfo: quality || size
+            };
+        });
+
+        console.log('[TorboxHistory] ═══════════════════════════════════════');
+        console.log(`[TorboxHistory] ${metas.length} entrées générées`);
+
+        return { metas };
+
+    } catch (error) {
+        console.error('[TorboxHistory] Erreur:', error.message);
+        return {
+            metas: [{
+                id: 'tbhistory:error',
+                type: 'other',
+                name: 'Erreur de connexion',
+                poster: generatePoster('❌', 'Erreur', 'ff0000'),
+                description: `Impossible de récupérer l'historique.\n\nErreur: ${error.message}`
+            }]
+        };
+    }
+}
+
 // Manifest de l'addon
 const manifest = {
     id: 'community.torbox.status',
-    version: '1.0.1',
+    version: '1.1.0',
     name: 'Torbox Status',
-    description: 'Affiche les stats de ton compte Torbox',
+    description: 'Stats Torbox + Derniers visionnages',
     logo: 'https://torbox.app/favicon.ico',
     catalogs: [
         {
             type: 'other',
             id: 'torbox-status',
             name: 'Torbox Status'
+        },
+        {
+            type: 'other',
+            id: 'torbox-history',
+            name: 'Derniers Visionnages'
         }
     ],
     resources: ['catalog', 'meta'],
     types: ['other'],
-    idPrefixes: ['tbstatus:']
+    idPrefixes: ['tbstatus:', 'tbhistory:']
 };
 
 const builder = new addonBuilder(manifest);
 
 /**
- * Handler du catalogue - Affiche les stats
+ * Handler du catalogue - Affiche les stats ou l'historique
  */
 builder.defineCatalogHandler(async ({ type, id }) => {
-    if (type !== 'other' || id !== 'torbox-status') {
+    if (type !== 'other') {
+        return { metas: [] };
+    }
+
+    // Catalogue Historique
+    if (id === 'torbox-history') {
+        return handleHistoryCatalog();
+    }
+
+    // Catalogue Status
+    if (id !== 'torbox-status') {
         return { metas: [] };
     }
 
