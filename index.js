@@ -16,6 +16,9 @@ const PORT = parseInt(process.env.PORT, 10) || 7003;
 const TORBOX_API_KEY = process.env.TORBOX_API_KEY;
 const TORBOX_API_URL = 'https://api.torbox.app/v1/api';
 
+/** Cache des torrents pour le stream handler */
+const torrentsCache = new Map();
+
 /**
  * Récupère les infos du compte Torbox
  * @returns {Promise<Object>}
@@ -59,7 +62,42 @@ async function getTorboxTorrents() {
     }
 
     const data = await response.json();
-    return data.data || [];
+    const torrents = data.data || [];
+
+    // Met en cache pour le stream handler
+    torrents.forEach(t => torrentsCache.set(String(t.id), t));
+
+    return torrents;
+}
+
+/**
+ * Récupère le lien de streaming pour un torrent
+ * @param {number} torrentId - ID du torrent
+ * @param {number} [fileId] - ID du fichier (optionnel)
+ * @returns {Promise<string>}
+ */
+async function getTorboxStreamLink(torrentId, fileId = null) {
+    if (!TORBOX_API_KEY) {
+        throw new Error('TORBOX_API_KEY non configurée');
+    }
+
+    let url = `${TORBOX_API_URL}/torrents/requestdl?token=${TORBOX_API_KEY}&torrent_id=${torrentId}`;
+    if (fileId) {
+        url += `&file_id=${fileId}`;
+    }
+
+    const response = await fetch(url, {
+        headers: {
+            'Authorization': `Bearer ${TORBOX_API_KEY}`
+        }
+    });
+
+    if (!response.ok) {
+        throw new Error(`Erreur API Torbox: ${response.status}`);
+    }
+
+    const data = await response.json();
+    return data.data;
 }
 
 /**
@@ -257,7 +295,7 @@ async function handleHistoryCatalog() {
 // Manifest de l'addon
 const manifest = {
     id: 'community.torbox.status',
-    version: '1.1.1',
+    version: '1.2.0',
     name: 'Torbox Status',
     description: 'Stats Torbox + Derniers visionnages',
     logo: 'https://torbox.app/favicon.ico',
@@ -273,7 +311,7 @@ const manifest = {
             name: 'Derniers Visionnages'
         }
     ],
-    resources: ['catalog', 'meta'],
+    resources: ['catalog', 'meta', 'stream'],
     types: ['other'],
     idPrefixes: ['tbstatus:', 'tbhistory:']
 };
@@ -448,6 +486,86 @@ builder.defineMetaHandler(async ({ type, id }) => {
         return { meta };
     } catch (error) {
         return { meta: null };
+    }
+});
+
+/**
+ * Handler de stream - Lance un torrent depuis l'historique
+ */
+builder.defineStreamHandler(async ({ type, id }) => {
+    if (type !== 'other' || !id.startsWith('tbhistory:')) {
+        return { streams: [] };
+    }
+
+    const torrentId = id.replace('tbhistory:', '');
+    console.log(`[TorboxStream] Demande de stream pour torrent ${torrentId}`);
+
+    try {
+        // Vérifie le cache, sinon recharge les torrents
+        let torrent = torrentsCache.get(torrentId);
+        if (!torrent) {
+            console.log('[TorboxStream] Torrent pas en cache, rechargement...');
+            await getTorboxTorrents();
+            torrent = torrentsCache.get(torrentId);
+        }
+
+        if (!torrent) {
+            console.log('[TorboxStream] Torrent introuvable');
+            return { streams: [] };
+        }
+
+        const streams = [];
+
+        // Si le torrent a des fichiers listés, on crée un stream par fichier vidéo
+        if (torrent.files && torrent.files.length > 0) {
+            const videoExtensions = ['.mkv', '.mp4', '.avi', '.mov', '.wmv', '.webm'];
+
+            for (const file of torrent.files) {
+                const isVideo = videoExtensions.some(ext =>
+                    file.name.toLowerCase().endsWith(ext)
+                );
+
+                if (isVideo) {
+                    try {
+                        const streamUrl = await getTorboxStreamLink(torrent.id, file.id);
+                        const quality = extractQuality(file.name);
+
+                        streams.push({
+                            name: `Torbox`,
+                            title: `${quality ? quality + ' • ' : ''}${file.name}`,
+                            url: streamUrl
+                        });
+
+                        console.log(`[TorboxStream] Stream ajouté: ${file.name}`);
+                    } catch (err) {
+                        console.error(`[TorboxStream] Erreur fichier ${file.id}:`, err.message);
+                    }
+                }
+            }
+        } else {
+            // Pas de fichiers listés, on essaie avec le torrent entier
+            try {
+                const streamUrl = await getTorboxStreamLink(torrent.id);
+                const quality = extractQuality(torrent.name);
+
+                streams.push({
+                    name: `Torbox`,
+                    title: `${quality ? quality + ' • ' : ''}${torrent.name}`,
+                    url: streamUrl
+                });
+
+                console.log(`[TorboxStream] Stream ajouté: ${torrent.name}`);
+            } catch (err) {
+                console.error(`[TorboxStream] Erreur torrent:`, err.message);
+            }
+        }
+
+        console.log(`[TorboxStream] ${streams.length} stream(s) disponible(s)`);
+        return { streams };
+
+    } catch (error) {
+        console.error('[TorboxStream] Erreur:', error.message);
+        return { streams: [] };
     }
 });
 
