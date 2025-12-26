@@ -480,7 +480,7 @@ const catalogs = ENABLE_CATALOG ? [
 // Manifest de l'addon
 const manifest = {
     id: 'community.torbox.status',
-    version: '2.2.0',
+    version: '2.2.1',
     name: 'Torbox Status',
     description: ENABLE_CATALOG
         ? 'Stats Torbox + Films & Séries récents avec vrais posters'
@@ -496,7 +496,9 @@ const builder = new addonBuilder(manifest);
 
 /**
  * Handler du catalogue - Stats, Films ou Séries
+ * (uniquement si ENABLE_CATALOG=true)
  */
+if (ENABLE_CATALOG) {
 builder.defineCatalogHandler(async ({ type, id }) => {
     // Catalogue Films
     if (type === 'movie' && id === 'torbox-movies') {
@@ -618,10 +620,13 @@ builder.defineCatalogHandler(async ({ type, id }) => {
         };
     }
 });
+} // Fin if (ENABLE_CATALOG)
 
 /**
  * Handler meta - Détails d'une stat ou d'un torrent fallback
+ * (uniquement si ENABLE_CATALOG=true)
  */
+if (ENABLE_CATALOG) {
 builder.defineMetaHandler(async ({ type, id }) => {
     // Meta pour les fallback tb: (films/séries non trouvés sur Cinemeta)
     if (id.startsWith('tb:')) {
@@ -707,6 +712,7 @@ builder.defineMetaHandler(async ({ type, id }) => {
         return { meta: null };
     }
 });
+} // Fin if (ENABLE_CATALOG) pour meta
 
 /**
  * Génère les streams pour un torrent donné
