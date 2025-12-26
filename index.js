@@ -53,13 +53,37 @@ function formatBytes(bytes) {
 }
 
 /**
- * Formate une date timestamp en date lisible
- * @param {number} timestamp
+ * Parse une date (timestamp Unix, ISO string, ou Date)
+ * @param {number|string} dateValue
+ * @returns {Date|null}
+ */
+function parseDate(dateValue) {
+    if (!dateValue) return null;
+
+    // Si c'est déjà un timestamp en millisecondes (> 1e12)
+    if (typeof dateValue === 'number' && dateValue > 1e12) {
+        return new Date(dateValue);
+    }
+    // Si c'est un timestamp en secondes
+    if (typeof dateValue === 'number') {
+        return new Date(dateValue * 1000);
+    }
+    // Si c'est une string ISO
+    if (typeof dateValue === 'string') {
+        return new Date(dateValue);
+    }
+    return null;
+}
+
+/**
+ * Formate une date en date lisible
+ * @param {number|string} dateValue
  * @returns {string}
  */
-function formatDate(timestamp) {
-    if (!timestamp) return 'N/A';
-    const date = new Date(timestamp * 1000);
+function formatDate(dateValue) {
+    const date = parseDate(dateValue);
+    if (!date || isNaN(date.getTime())) return 'N/A';
+
     return date.toLocaleDateString('fr-FR', {
         day: 'numeric',
         month: 'long',
@@ -69,13 +93,15 @@ function formatDate(timestamp) {
 
 /**
  * Calcule les jours restants
- * @param {number} timestamp
+ * @param {number|string} dateValue
  * @returns {number}
  */
-function daysRemaining(timestamp) {
-    if (!timestamp) return 0;
+function daysRemaining(dateValue) {
+    const date = parseDate(dateValue);
+    if (!date || isNaN(date.getTime())) return 0;
+
     const now = Date.now();
-    const expiry = timestamp * 1000;
+    const expiry = date.getTime();
     const diff = expiry - now;
     return Math.max(0, Math.ceil(diff / (1000 * 60 * 60 * 24)));
 }
@@ -96,7 +122,7 @@ function generatePoster(emoji, value, bgColor = '1a1a2e') {
 // Manifest de l'addon
 const manifest = {
     id: 'community.torbox.status',
-    version: '1.0.0',
+    version: '1.0.1',
     name: 'Torbox Status',
     description: 'Affiche les stats de ton compte Torbox',
     logo: 'https://torbox.app/favicon.ico',
@@ -127,19 +153,31 @@ builder.defineCatalogHandler(async ({ type, id }) => {
     try {
         const user = await getTorboxUserInfo();
 
+        // Debug: affiche les données brutes
+        console.log('[TorboxStatus] ═══════════════════════════════════════');
         console.log('[TorboxStatus] Utilisateur:', user.email);
+        console.log('[TorboxStatus] Plan:', user.plan);
+        console.log('[TorboxStatus] Premium expires:', user.premium_expires_at, '→', formatDate(user.premium_expires_at));
+        console.log('[TorboxStatus] Jours restants:', daysRemaining(user.premium_expires_at));
+        console.log('[TorboxStatus] Cloud:', formatBytes(user.total_bytes_downloaded || 0));
+        console.log('[TorboxStatus] Torrents actifs:', user.active_torrents || 0);
+        console.log('[TorboxStatus] Usenet actifs:', user.active_usenet_downloads || 0);
+        console.log('[TorboxStatus] Web DL actifs:', user.active_web_downloads || 0);
+        console.log('[TorboxStatus] ═══════════════════════════════════════');
 
         const metas = [];
 
         // 1. Plan & Expiration
         const days = daysRemaining(user.premium_expires_at);
         const planStatus = user.is_subscribed ? '🟢 Actif' : '🔴 Inactif';
+        const daysText = days > 0 ? `${days}j restants` : (user.premium_expires_at ? 'Expiré' : 'Illimité');
+        const daysDisplay = days > 0 ? `${days} jours` : (user.premium_expires_at ? 'Expiré' : '∞');
         metas.push({
             id: 'tbstatus:plan',
             type: 'other',
-            name: `${user.plan} - ${days}j restants`,
-            poster: generatePoster('📅', `${days} jours`, '16213e'),
-            description: `Plan: ${user.plan}\nStatut: ${planStatus}\nExpire le: ${formatDate(user.premium_expires_at)}`,
+            name: `${user.plan || 'Free'} - ${daysText}`,
+            poster: generatePoster('📅', daysDisplay, '16213e'),
+            description: `Plan: ${user.plan || 'Free'}\nStatut: ${planStatus}\nExpire le: ${formatDate(user.premium_expires_at)}`,
             releaseInfo: planStatus
         });
 
