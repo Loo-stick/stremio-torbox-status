@@ -460,7 +460,7 @@ async function handleMediaCatalog(catalogType) {
 // Manifest de l'addon
 const manifest = {
     id: 'community.torbox.status',
-    version: '2.0.0',
+    version: '2.0.1',
     name: 'Torbox Status',
     description: 'Stats Torbox + Films & Séries récents avec vrais posters',
     logo: 'https://torbox.app/favicon.ico',
@@ -483,7 +483,7 @@ const manifest = {
     ],
     resources: ['catalog', 'meta', 'stream'],
     types: ['other', 'movie', 'series'],
-    idPrefixes: ['tbstatus:', 'tb:']
+    idPrefixes: ['tbstatus:', 'tb:', 'tt']
 };
 
 const builder = new addonBuilder(manifest);
