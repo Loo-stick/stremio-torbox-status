@@ -17,6 +17,7 @@ const PORT = parseInt(process.env.PORT, 10) || 7003;
 const TORBOX_API_KEY = process.env.TORBOX_API_KEY;
 const TORBOX_API_URL = 'https://api.torbox.app/v1/api';
 const CINEMETA_URL = 'https://v3-cinemeta.strem.io';
+const ENABLE_CATALOG = process.env.ENABLE_CATALOG !== 'false'; // true par défaut
 
 /** Cache des torrents pour le stream handler */
 const torrentsCache = new Map();
@@ -457,31 +458,36 @@ async function handleMediaCatalog(catalogType) {
     }
 }
 
+// Catalogues (conditionnés par ENABLE_CATALOG)
+const catalogs = ENABLE_CATALOG ? [
+    {
+        type: 'other',
+        id: 'torbox-status',
+        name: 'Torbox Status'
+    },
+    {
+        type: 'movie',
+        id: 'torbox-movies',
+        name: 'Torbox Films'
+    },
+    {
+        type: 'series',
+        id: 'torbox-series',
+        name: 'Torbox Séries'
+    }
+] : [];
+
 // Manifest de l'addon
 const manifest = {
     id: 'community.torbox.status',
-    version: '2.1.0',
+    version: '2.2.0',
     name: 'Torbox Status',
-    description: 'Stats Torbox + Films & Séries récents avec vrais posters',
+    description: ENABLE_CATALOG
+        ? 'Stats Torbox + Films & Séries récents avec vrais posters'
+        : 'Streams Torbox Cloud (catalogues désactivés)',
     logo: 'https://torbox.app/favicon.ico',
-    catalogs: [
-        {
-            type: 'other',
-            id: 'torbox-status',
-            name: 'Torbox Status'
-        },
-        {
-            type: 'movie',
-            id: 'torbox-movies',
-            name: 'Torbox Films'
-        },
-        {
-            type: 'series',
-            id: 'torbox-series',
-            name: 'Torbox Séries'
-        }
-    ],
-    resources: ['catalog', 'meta', 'stream'],
+    catalogs,
+    resources: ENABLE_CATALOG ? ['catalog', 'meta', 'stream'] : ['stream'],
     types: ['other', 'movie', 'series'],
     idPrefixes: ['tbstatus:', 'tb:', 'tt']
 };
@@ -893,6 +899,7 @@ app.listen(PORT, () => {
 ║════════════════════════════════════════════║
 ║  Port: ${PORT}                               ║
 ║  API Key: ${TORBOX_API_KEY ? '✓ Configurée' : '✗ Manquante'}                    ║
+║  Catalogs: ${ENABLE_CATALOG ? '✓ Activés' : '✗ Désactivés'}                     ║
 ╠════════════════════════════════════════════╣
 ║  Manifest: http://localhost:${PORT}/manifest.json
 ╚════════════════════════════════════════════╝
